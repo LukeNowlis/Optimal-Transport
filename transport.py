@@ -1,3 +1,6 @@
+#======================
+#ONE DIMENTION PROBLEM
+#======================
 import numpy as np
 import ot
 import random 
@@ -25,6 +28,9 @@ def one_dimention():
     cost=find_cost(m_plus, m_minus)
     kant(f_plus, f_minus,cost)
 
+#======================
+#TWO DIMENTION PROBLEM
+#======================
 def two_dimentions(grid_size):
     def find_cost(m_plus: np.array[[int],[int]], m_minus: np.array[[int],[int]]):
         cost=np.zeros((grid_size**2,grid_size**2))
@@ -43,14 +49,14 @@ def two_dimentions(grid_size):
         print(gamma)
         
 
-    # Create a 3x3 grid of coordinates
+
     x = np.arange(grid_size)
     y = np.arange(grid_size)
     xx, yy = np.meshgrid(x, y)
     m_plus = np.stack([xx, yy], axis=-1)
     m_minus=m_plus.copy()
 
-    # Create two 3x3 matrices with random integers (0-5)
+
     f_plus = np.random.randint(0, 6, size=(grid_size, grid_size))
     f_minus = np.random.randint(0, 6, size=(grid_size, grid_size))
 
