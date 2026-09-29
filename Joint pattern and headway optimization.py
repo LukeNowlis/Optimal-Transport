@@ -7,7 +7,6 @@ from itertools import product, combinations, chain
 def joint_headway():
     'SIMPLIFICATIONS SO FAR'
     'no transferes'
-    'no eq. 20'
 
     #GENERATES INFROMATION ABOUT C_R, RETURNS C_R, PERCEIVED HEADWAY AND C 
     def generate_combos(headway, pattern_num):
