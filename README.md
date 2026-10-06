@@ -17,7 +17,7 @@ The project involves translating a transportation planning problem into a mathem
 * Python
 
 ## Projects 
-* 'Elevator.py' - Design of optimal elevator patterns for real world implementation, my own model I built 
+* `Elevator.py` - Design of optimal elevator patterns for real world implementation, my own model I built 
 * `Joint pattern and headway optimization.py` — Implentations of 'Joint Optimization of Pattern, Headway, and Fleet Size of Multiple Urban Transit Lines  
 with Perceived Headway Consideration and Passenger Flow Allocation' with my own additions and changes 
 * `kant.py` — Code for the original Kantorovich problem 
