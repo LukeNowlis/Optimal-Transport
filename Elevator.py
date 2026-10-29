@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.optimize import milp, LinearConstraint, Bounds
 import time
 import math
 from pyscipopt import Model, quicksum
@@ -10,12 +9,12 @@ from pyscipopt import Model, quicksum
 #===================
 t_init_start = time.perf_counter()
 
-NUMBER_OF_FLOORS=4
+NUMBER_OF_FLOORS=2
 s=NUMBER_OF_FLOORS
 NUMBER_OF_ELEVATORS=2
 p=NUMBER_OF_ELEVATORS
 CAPASITY_ELEVATOR=5
-m=100
+m=25
 
 #Elevator times 
 ACEL=0.9        #discount given to direct trips i.e. skipping floors is faster than stopping(just travel wise)
@@ -46,12 +45,9 @@ print(np.round(T_stairs, 3))
 
 #supply matrix
 print('Supply')
-E = np.array([
-    [0, 13, 15, 0],
-    [0, 0, 15, 0],
-    [0, 0, 0, 0],
-    [0, 0, 0, 0]
-    ])
+rng = np.random.default_rng()            
+E = rng.integers(0, m-10, size=(s, s))    
+np.fill_diagonal(E, 0)              
 print(E)
 #endregion 
 
@@ -648,4 +644,5 @@ def cost_breakdown(x_opt, model=None):
 output(x_opt)
 cost_breakdown(x_opt, model)
 #endregion
+
 
