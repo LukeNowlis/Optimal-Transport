@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import time
 import math
 from pyscipopt import Model, quicksum
+import json, os
 
 #CODE WHERE ELEVATOR 3 DOESNT STOP ABOVE FLOOR 3
 
@@ -10,9 +11,9 @@ from pyscipopt import Model, quicksum
 #===================
 t_init_start = time.perf_counter()
 
-NUMBER_OF_FLOORS=4
+NUMBER_OF_FLOORS=2
 s=NUMBER_OF_FLOORS
-NUMBER_OF_ELEVATORS=3
+NUMBER_OF_ELEVATORS=2
 p=NUMBER_OF_ELEVATORS
 CAPASITY_ELEVATOR=5
 m=25
@@ -409,7 +410,9 @@ for e in range(p):
         mid_sum+=(G(i,e,'up')+G(i,e,'down'))
     mid_sum+=G(s-1,e,'down')
 obj_expr = quicksum(c_obj[c] * vars_list[c] for c in range(total_vars) if c_obj[c] != 0)+base_sum+mid_sum
-print(f"Initalizing took {time.perf_counter() - t_init_start:.2f} seconds") 
+
+init_time = time.perf_counter() - t_init_start
+print(f"Initalizing took {init_time} seconds") 
 #endregion
 
 #region SOLVING AND OUTPUT 
@@ -424,8 +427,8 @@ model.optimize()
 print(model.getStatus())
 x_opt = np.array([model.getVal(v) for v in vars_list])
 
-
-print(f"Optimization took {time.perf_counter() - t_opt_start:.2f} seconds") 
+opt_time = time.perf_counter() - t_opt_start
+print(f"Optimization took {opt_time}  seconds") 
 
 def plot_flow_matrix(matrix, title, ax, vmax):
     im = ax.imshow(matrix, cmap='viridis', vmin=0, vmax=vmax)
@@ -519,7 +522,7 @@ def output(x_opt):
 
     # === PLOTS ===
     n_plots = 2 + p
-    fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 5))
+    fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 5),num='Building Flow')
 
     all_matrices = [E, stairs_matrix] + elevator_matrices
     vmax = max(mat.max() for mat in all_matrices)
@@ -531,7 +534,7 @@ def output(x_opt):
     for e in range(p):
         served = [i for i in range(s) if x_opt[col_v(e, i)] > 0.5]
         plot_flow_matrix(elevator_matrices[e], f"Elevator {e} (stops: {served})", axes[2 + e], vmax)
-
+    plt.suptitle("Overall Project Flow", fontsize=16)
     plt.tight_layout()
     plt.show()
 
@@ -646,7 +649,34 @@ def cost_breakdown(x_opt, model=None):
     if model is not None:
         print(f"  SCIP objective    : {model.getObjVal():8.2f}")
 
+LOG_FILE = "Run_time.json"
+
+def log_run(record):
+    runs = []
+    if os.path.exists(LOG_FILE):
+        try:
+            with open(LOG_FILE, "r") as f:
+                runs = json.load(f)
+        except json.JSONDecodeError:
+            runs = []                      # empty or corrupted file, start fresh
+    runs.append(record)
+    with open(LOG_FILE, "w") as f:
+        json.dump(runs, f, indent=2)
+
+log_run({
+    "m": m,
+    "elevators": p,
+    "floors": s,
+    "people": int(E.sum()),
+    "capacity": CAPASITY_ELEVATOR,
+    "init_time": round(init_time, 4),
+    "opt_time": round(opt_time, 4),
+    "status": model.getStatus(),
+    "objective": model.getObjVal(),
+})
 output(x_opt)
 cost_breakdown(x_opt, model)
 #endregion
+
+
 
