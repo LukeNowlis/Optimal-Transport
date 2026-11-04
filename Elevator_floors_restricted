@@ -5,8 +5,6 @@ import math
 from pyscipopt import Model, quicksum
 import json, os
 
-#CODE WHERE ELEVATOR 3 DOESNT STOP ABOVE FLOOR 3
-
 #region INITALIZING NUMBERS
 #===================
 t_init_start = time.perf_counter()
@@ -335,10 +333,6 @@ for e in range(p):
     n = total / CAPASITY_ELEVATOR
     model.addCons(vars_list[col_n(e)] >= n)
     model.addCons(vars_list[col_n(e)] <= n + 1- 1e-4)
-
-#ELEVATOR 3 CANT STOP ABOVE 3
-for j in range(3 + 1, s):
-    model.addCons(vars_list[col_v(3, j)] == 0)
 #endregion
 
 #region Objective function
@@ -649,7 +643,7 @@ def cost_breakdown(x_opt, model=None):
     if model is not None:
         print(f"  SCIP objective    : {model.getObjVal():8.2f}")
 
-LOG_FILE = "Run_time.json"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Run_time.json")
 
 def log_run(record):
     runs = []
@@ -657,11 +651,16 @@ def log_run(record):
         try:
             with open(LOG_FILE, "r") as f:
                 runs = json.load(f)
-        except json.JSONDecodeError:
-            runs = []                      # empty or corrupted file, start fresh
+        except (json.JSONDecodeError, OSError):
+            runs = []
+    if not isinstance(runs, list):
+        runs = []
     runs.append(record)
-    with open(LOG_FILE, "w") as f:
-        json.dump(runs, f, indent=2)
+    try:
+        with open(LOG_FILE, "w") as f:
+            json.dump(runs, f, indent=2)
+    except OSError as err:
+        print(f"Could not write run log: {err}")   # don't let logging kill the run
 
 log_run({
     "m": m,
@@ -677,6 +676,4 @@ log_run({
 output(x_opt)
 cost_breakdown(x_opt, model)
 #endregion
-
-
 
