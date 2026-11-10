@@ -3,18 +3,17 @@ import matplotlib.pyplot as plt
 import time
 import math
 from pyscipopt import Model, quicksum
-
+import json, os
 
 #region INITALIZING NUMBERS
 #===================
 t_init_start = time.perf_counter()
 
-NUMBER_OF_FLOORS=2
+NUMBER_OF_FLOORS=4
 s=NUMBER_OF_FLOORS
 NUMBER_OF_ELEVATORS=2
 p=NUMBER_OF_ELEVATORS
 CAPASITY_ELEVATOR=5
-m=25
 
 #Elevator times 
 ACEL=0.9        #discount given to direct trips i.e. skipping floors is faster than stopping(just travel wise)
@@ -44,11 +43,15 @@ print('STAIRS')
 print(np.round(T_stairs, 3))
 
 #supply matrix
+RANGE=10 #number of people who could be assigned any one floor and destination
 print('Supply')
-rng = np.random.default_rng()            
-E = rng.integers(0, m-10, size=(s, s))    
-np.fill_diagonal(E, 0)              
+rng = np.random.default_rng(10)            
+E = rng.integers(0, RANGE, size=(s, s))    
+np.fill_diagonal(E, 0)     
+total_people = int(E.sum()) #total_people in the system 
 print(E)
+
+m=total_people #BIG m, used as an upper bound, can use some tightening later potentialy 
 #endregion 
 
 # region INDEXING
@@ -57,13 +60,16 @@ print(E)
 #how many pairs of floor to floor options there are given a destination, meaning i =! d and j=! i  
 i_j_pairs_given_d = (s - 1)**2
 v_num=p*s
-h_num=(s*(s-1))/2
+h_num=(s*(s-1))//2
 f_alpha_num=s*(s-1)*p
 f_beta_num = s*s*p
 f_lambda_num=s*p*i_j_pairs_given_d
 f_eta_num=s*i_j_pairs_given_d
 f_omega_num=s*(s-1)
 n_num=p
+n_max=math.ceil(total_people/CAPASITY_ELEVATOR)
+N = n_max + 1
+w_num = p * N * h_num #Only correct since h_num hasn't been mutiplied by p yet 
 
 # h_pair_lookup: maps (T, count) finds all possible Top floor and count combinations, useful for constraints and used later on 
 h_pair_lookup = {}
@@ -85,7 +91,9 @@ idx['f_eta']    = (col, col + f_eta_num);    col += f_eta_num
 
 idx['v']        = (col, col + v_num);        col += v_num
 idx['h']        = (col, col + h_num);        col += h_num
-idx['n']     = (col, col + n_num);        col += n_num
+idx['w']        = (col, col + w_num);        col += w_num
+
+idx['n']        = (col, col + n_num);        col += n_num
 
 total_vars = col
 
@@ -164,6 +172,20 @@ def get_elevator_headway(x_opt, e):
     return None, None, None   # should not happen if "exactly one h" constraint holds
 #endregion
 
+#region W LINEARIZING n*h
+#create W variable which multiplies n and h we do this to simplify things for the solver 
+
+def col_w(e, n_int, T, count):
+    return idx['w'][0] + e*N*h_idx + n_int*h_idx + h_pair_lookup[(T, count)]
+
+WAIT_FACTOR = 0.5   # average wait is half a loop; set to 1.0 to go back to worst case this is to adjust for h 
+
+W_lookup = {}
+for nu in range(n_max + 1):
+    for (T, count), hd in headway_lookup.items():
+        W_lookup[(nu, T, count)] = nu * WAIT_FACTOR * hd
+#endregion
+
 #region OPTIMIZATION INITALIZATION 
 #=================================
 cont = sum([f_alpha_num, f_beta_num, f_lambda_num, f_omega_num, f_eta_num])
@@ -171,11 +193,10 @@ bi= sum([v_num,h_num])
 
 model = Model()
 
-binary_blocks = {'v', 'h'}
+binary_blocks = {'v', 'h', 'w'}
 vars_list = [None] * total_vars
 
 integer_blocks = {'n'}
-n_max = int(np.ceil(E.sum() / CAPASITY_ELEVATOR)) 
 
 #Establish variables, type and bounds 
 for name, (start, end) in idx.items():
@@ -333,6 +354,25 @@ for e in range(p):
     n = total / CAPASITY_ELEVATOR
     model.addCons(vars_list[col_n(e)] >= n)
     model.addCons(vars_list[col_n(e)] <= n + 1- 1e-4)
+
+# EQ 13 and 14 
+# For each elevator and route (T, count): the W's across all n values sum to that route's h.
+# h is 1 for exactly one route (EQ 10), so exactly one W per elevator is on, and it belongs to the active route.
+for e in range(p):
+    for (T, count) in h_pair_lookup:
+        model.addCons(
+            quicksum(vars_list[col_w(e, nu, T, count)] for nu in range(N))
+            == vars_list[col_h(e, T, count)]
+        )
+
+# The n of the active W must equal the n variable.
+for e in range(p):
+    model.addCons(
+        vars_list[col_n(e)]
+        == quicksum(nu * vars_list[col_w(e, nu, T, count)]
+                    for nu in range(N)
+                    for (T, count) in h_pair_lookup)
+    )
 #endregion
 
 #region Objective function
@@ -365,8 +405,7 @@ for d in range(s):
                 c_obj[col_f_lambda(d, e, pair_lookup[(d, i, j)])] += C_lambda(i, j)
 
 #WAITING COST
-WAIT_FACTOR = 0.5   # average wait is half a loop; set to 1.0 to go back to worst case
-MID_CONSTANT = 0.55
+MID_CONSTANT = 0.55 # a constant close to 1/2 for mid floors equation 
 
 def H_expr(e):
     return WAIT_FACTOR * quicksum(headway_lookup[(T, count)] * vars_list[col_h(e, T, count)]
@@ -382,29 +421,45 @@ def F_lambda_cost(i, e, direction):
         for d in range(s) if d != i
         for j in targets)
 
-#Mid floors 
-def G(i,e,direction):
-    H=H_expr(e)
-    N=F_lambda_cost(i,e,direction)/CAPASITY_ELEVATOR
-    return(N+1)*H*F_alpha_cost(i,e,direction)*MID_CONSTANT
+def W_expr(e):
+    return quicksum(W_lookup[(nu, T, count)] * vars_list[col_w(e, nu, T, count)]
+                    for (nu, T, count) in W_lookup)
+
+K = CAPASITY_ELEVATOR
 
 #BOTTUM FLOOR 
 base_sum = 0
 for e in range(p):
     n = vars_list[col_n(e)]
-    H = H_expr(e)
-    k = CAPASITY_ELEVATOR
-    base_sum += k * H * n * (n - 1) / 2
-    base_sum += (F_alpha_cost(0, e, 'up') - (n - 1) * k) * H * n
+    W = W_expr(e)
+    base_sum += K * W * (n - 1) / 2 # sum from 0 to n-1
+    base_sum += (F_alpha_cost(0, e, 'up') - (n - 1) * K) * W
 
-#Mid floors 
-mid_sum=0
+# Mid floors, added U constrint to turn this equation into a quadratic as well 
+mid_sum = 0
 for e in range(p):
-    for i in range(1,s-1):
-        mid_sum+=(G(i,e,'up')+G(i,e,'down'))
-    mid_sum+=G(s-1,e,'down')
-obj_expr = quicksum(c_obj[c] * vars_list[c] for c in range(total_vars) if c_obj[c] != 0)+base_sum+mid_sum
-print(f"Initalizing took {time.perf_counter() - t_init_start:.2f} seconds") 
+    floors = ([(i, 'up') for i in range(1, s - 1)] +
+              [(i, 'down') for i in range(1, s - 1)] +
+              [(s - 1, 'down')])
+    for i, direction in floors:
+        Fa = F_alpha_cost(i, e, direction)
+        Fl = F_lambda_cost(i, e, direction)
+
+        # one copy of Fa per route
+        u = {c: model.addVar(lb=0, ub=m) for c in h_pair_lookup}
+        for c in h_pair_lookup:
+            model.addCons(u[c] <= m * vars_list[col_h(e, *c)])   # off unless route c is active
+        model.addCons(quicksum(u.values()) == Fa)                # copies add up to Fa
+
+        # H*Fa, linear (WAIT_FACTOR applied, same as H_expr)
+        HFa = quicksum(WAIT_FACTOR * headway_lookup[c] * u[c] for c in h_pair_lookup)
+
+        mid_sum += MID_CONSTANT * (HFa + HFa * Fl / K)    # HFa*Fl is the one quadratic term
+
+obj_expr = quicksum(c_obj[c] * vars_list[c] for c in range(total_vars) if c_obj[c] != 0) + base_sum + mid_sum
+
+init_time = time.perf_counter() - t_init_start
+print(f"Initalizing took {init_time:.2f} seconds") 
 #endregion
 
 #region SOLVING AND OUTPUT 
@@ -416,14 +471,35 @@ model.hideOutput()
 model.setObjective(t, "minimize")
 model.optimize()
 
-print(model.getStatus())
-x_opt = np.array([model.getVal(v) for v in vars_list])
+opt_time = time.perf_counter() - t_opt_start
 
+status = model.getStatus()
+print(status)
+print(f"Optimization took {opt_time:.2f} seconds")
 
-print(f"Optimization took {time.perf_counter() - t_opt_start:.2f} seconds") 
+if status == "optimal":
+    x_opt = np.array([model.getVal(v) for v in vars_list])
+
+    print("\n=== W check ===")
+    for e in range(p):
+        n_val = x_opt[col_n(e)]
+
+        # h dot headway_lookup (WAIT_FACTOR not applied, raw headway)
+        H_dot = sum(headway_lookup[(T, count)] * x_opt[col_h(e, T, count)]
+                    for (T, count) in h_pair_lookup)
+
+        # w dot W_lookup (this is n * WAIT_FACTOR * H)
+        W_dot = sum(W_lookup[(nu, T, count)] * x_opt[col_w(e, nu, T, count)]
+                    for (nu, T, count) in W_lookup)
+
+        # what W_dot should equal
+        expected = n_val * WAIT_FACTOR * H_dot
+
+        print(f"  Elevator {e}: n = {n_val:.0f} | h.headway = {H_dot:.2f} | "
+              f"w.W_lookup = {W_dot:.2f} | expected n*WAIT_FACTOR*H = {expected:.2f}")
 
 def plot_flow_matrix(matrix, title, ax, vmax):
-    im = ax.imshow(matrix, cmap='viridis', vmin=0, vmax=vmax)
+    ax.imshow(matrix, cmap='viridis', vmin=0, vmax=vmax)
     ax.set_title(title)
     ax.set_xlabel("To floor")
     ax.set_ylabel("From floor")
@@ -434,7 +510,7 @@ def plot_flow_matrix(matrix, title, ax, vmax):
             val = matrix[i, j]
             if val > 0.01:
                 ax.text(j, i, f"{val:.1f}", ha='center', va='center',
-                         color='white' if val > vmax/2 else 'black')
+                        color='white' if val > vmax / 2 else 'black')
 
 def output(x_opt):
     print("\n=== Served floors ===")
@@ -447,7 +523,6 @@ def output(x_opt):
         hw, T, count = get_elevator_headway(x_opt, e)
         print(f"  Elevator {e}: headway = {hw}, top = {T}, count = {count}")
 
-    # === STARTING FLOWS (f_omega) ===
     print("\n=== Starting flows (f_omega) ===")
     for d in range(s):
         for i in range(s):
@@ -457,7 +532,6 @@ def output(x_opt):
             if val > 0.01:
                 print(f"  f_omega[i={i}, d={d}] = {val:.2f}")
 
-    # === BOARDING FLOWS (f_alpha) ===
     print("\n=== Boarding flows (f_alpha) ===")
     for d in range(s):
         for i in range(s):
@@ -468,7 +542,6 @@ def output(x_opt):
                 if val > 0.01:
                     print(f"  f_alpha[i={i}, e={e}, d={d}] = {val:.2f}")
 
-    # === DE-BOARDING FLOWS (f_beta) ===
     print("\n=== De-boarding flows (f_beta) ===")
     for j in range(s):
         for e in range(p):
@@ -477,76 +550,50 @@ def output(x_opt):
                 if val > 0.01:
                     print(f"  f_beta[j={j}, e={e}, d={d}] = {val:.2f}")
 
-    # === INTER-STOP FLOWS (f_lambda) ===
     print("\n=== Inter-stop flows (f_lambda) ===")
     elevator_matrices = [np.zeros((s, s)) for _ in range(p)]
     for e in range(p):
-        for d in range(s):
-            for i in range(s):
-                if i == d:
-                    continue
-                for j in range(s):
-                    if j == i:
-                        continue
-                    if (d, i, j) not in pair_lookup:
-                        continue
-                    val = x_opt[col_f_lambda(d, e, pair_lookup[(d, i, j)])]
-                    if val > 0.01:
-                        print(f"  f_lambda[e={e}, d={d}, i={i}, j={j}] = {val:.2f}")
-                        elevator_matrices[e][i, j] += val
+        for (d, i, j), pidx in pair_lookup.items():
+            val = x_opt[col_f_lambda(d, e, pidx)]
+            if val > 0.01:
+                print(f"  f_lambda[e={e}, d={d}, i={i}, j={j}] = {val:.2f}")
+                elevator_matrices[e][i, j] += val
 
-    # === STAIRS FLOWS (f_eta) ===
     print("\n=== Stairs flows (f_eta) ===")
     stairs_matrix = np.zeros((s, s))
-    for d in range(s):
-        for i in range(s):
-            if i == d:
-                continue
-            for j in range(s):
-                if j == i:
-                    continue
-                if (d, i, j) not in pair_lookup:
-                    continue
-                val = x_opt[col_f_eta(d, pair_lookup[(d, i, j)])]
-                if val > 0.01:
-                    print(f"  f_eta[d={d}, i={i}, j={j}] = {val:.2f}")
-                    stairs_matrix[i, j] += val
+    for (d, i, j), pidx in pair_lookup.items():
+        val = x_opt[col_f_eta(d, pidx)]
+        if val > 0.01:
+            print(f"  f_eta[d={d}, i={i}, j={j}] = {val:.2f}")
+            stairs_matrix[i, j] += val
 
     # === PLOTS ===
     n_plots = 2 + p
-    fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 5))
-
+    fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 5), num='Building Flow')
     all_matrices = [E, stairs_matrix] + elevator_matrices
     vmax = max(mat.max() for mat in all_matrices)
     if vmax == 0:
-        vmax = 1   # avoid a degenerate 0-0 color scale if everything's empty
-
+        vmax = 1
     plot_flow_matrix(E, "Demand (E)", axes[0], vmax)
     plot_flow_matrix(stairs_matrix, "Stairs flow", axes[1], vmax)
     for e in range(p):
         served = [i for i in range(s) if x_opt[col_v(e, i)] > 0.5]
         plot_flow_matrix(elevator_matrices[e], f"Elevator {e} (stops: {served})", axes[2 + e], vmax)
-
+    plt.suptitle("Overall Project Flow", fontsize=16)
     plt.tight_layout()
     plt.show()
 
 def cost_breakdown(x_opt, model=None):
     k = CAPASITY_ELEVATOR
+    EPS = 1e-4
 
     # --- stairs and elevator riding (the parts in c_obj) ---
     stairs_cost = 0.0
     elev_cost = 0.0
-    for d in range(s):
-        for i in range(s):
-            if i == d:
-                continue
-            for j in range(s):
-                if j == i:
-                    continue
-                pidx = pair_lookup[(d, i, j)]
-                stairs_cost += T_stairs[i][j] * x_opt[col_f_eta(d, pidx)]
-                for e in range(p):
-                    elev_cost += C_lambda(i, j) * x_opt[col_f_lambda(d, e, pidx)]
+    for (d, i, j), pidx in pair_lookup.items():
+        stairs_cost += T_stairs[i][j] * x_opt[col_f_eta(d, pidx)]
+        for e in range(p):
+            elev_cost += C_lambda(i, j) * x_opt[col_f_lambda(d, e, pidx)]
 
     # --- numeric versions of F_alpha and F_lambda ---
     def num_alpha(i, e, direction):
@@ -558,7 +605,7 @@ def cost_breakdown(x_opt, model=None):
         return sum(x_opt[col_f_lambda(d, e, pair_lookup[(d, i, j)])]
                    for d in range(s) if d != i for j in targets)
 
-    # --- wait cost as a function of load, used for the marginal calculation ---
+    # --- wait cost as a function of load (H already has WAIT_FACTOR applied) ---
     def bottom_wait(F, H):
         n = math.ceil(F / k - 1e-9) if F > 1e-9 else 0
         return k * H * n * (n - 1) / 2 + (F - (n - 1) * k) * H * n
@@ -566,7 +613,10 @@ def cost_breakdown(x_opt, model=None):
     def mid_wait(F_a, F_l, H):
         return (F_l / k + 1) * H * F_a * MID_CONSTANT
 
-        # --- all-in cost of one more rider on each elevator hop vs stairs ---
+    def elev_H(e):
+        return get_elevator_headway(x_opt, e)[0] * WAIT_FACTOR
+
+    # --- marginal cost: elevator vs stairs ---
     print("\n=== Marginal cost: elevator vs stairs (direct hops only) ===")
     print(f"{'elev':>4} {'hop':>7} {'wait':>7} {'ride':>6} {'elev_tot':>9} "
           f"{'stairs':>7} {'elev-stairs':>12} {'elev_flow':>10} {'stair_flow':>11}")
@@ -575,12 +625,12 @@ def cost_breakdown(x_opt, model=None):
         direction = 'up' if j > i else 'down'
         F_a = num_alpha(i, e, direction)
         if i == 0:
-            return bottom_wait(F_a + 1, H) - bottom_wait(F_a, H)
+            return (bottom_wait(F_a + EPS, H) - bottom_wait(F_a, H)) / EPS
         F_l = num_lambda(i, e, direction)
-        return mid_wait(F_a + 1, F_l + 1, H) - mid_wait(F_a, F_l, H)
+        return (mid_wait(F_a + EPS, F_l + EPS, H) - mid_wait(F_a, F_l, H)) / EPS
 
     for e in range(p):
-        H = get_elevator_headway(x_opt, e)[0] * WAIT_FACTOR
+        H = elev_H(e)
         served = [i for i in range(s) if x_opt[col_v(e, i)] > 0.5]
         for i in served:
             for j in served:
@@ -588,7 +638,7 @@ def cost_breakdown(x_opt, model=None):
                     continue
                 lo, hi = min(i, j), max(i, j)
                 if any(lo < mid < hi for mid in served):
-                    continue  # not a direct hop for this elevator
+                    continue
                 wait = marginal_wait(i, j, e, H)
                 ride = C_lambda(i, j)
                 elev_tot = wait + ride
@@ -600,16 +650,16 @@ def cost_breakdown(x_opt, model=None):
                 print(f"{e:>4} {f'{i}->{j}':>7} {wait:>7.2f} {ride:>6.2f} {elev_tot:>9.2f} "
                       f"{stairs:>7.2f} {elev_tot - stairs:>12.2f} {elev_flow:>10.2f} {stair_flow:>11.2f}")
 
-    # --- bottom floor: exact, uses n ---
+    # --- bottom floor ---
     print("\n=== Bottom-floor wait (floor 0, up) ===")
     print(f"{'elev':>4} {'F_alpha':>8} {'n':>3} {'H':>7} {'cost':>8} {'marginal':>9}")
     base_cost = 0.0
     for e in range(p):
-        H = get_elevator_headway(x_opt, e)[0] * WAIT_FACTOR
+        H = elev_H(e)
         n = round(x_opt[col_n(e)])
         F = num_alpha(0, e, 'up')
         cost = k * H * n * (n - 1) / 2 + (F - (n - 1) * k) * H * n
-        marginal = bottom_wait(F + 1, H) - bottom_wait(F, H)
+        marginal = (bottom_wait(F + EPS, H) - bottom_wait(F, H)) / EPS
         base_cost += cost
         print(f"{e:>4} {F:>8.2f} {n:>3} {H:>7.2f} {cost:>8.2f} {marginal:>9.2f}")
 
@@ -618,18 +668,19 @@ def cost_breakdown(x_opt, model=None):
     print(f"{'elev':>4} {'floor':>5} {'dir':>5} {'F_alpha':>8} {'F_lambda':>9} {'N':>6} {'H':>7} {'cost':>8} {'marginal':>9}")
     mid_cost = 0.0
     for e in range(p):
-        H = get_elevator_headway(x_opt, e)[0] * WAIT_FACTOR
-        floors = [(i, d) for i in range(1, s - 1) for d in ('up', 'down')] + [(s - 1, 'down')]
+        H = elev_H(e)
+        floors = ([(i, d) for i in range(1, s - 1) for d in ('up', 'down')]
+                  + [(s - 1, 'down')])
         for i, direction in floors:
             F_a = num_alpha(i, e, direction)
-            if F_a < 0.01:
-                continue
             F_l = num_lambda(i, e, direction)
-            N = F_l / k
-            cost = (N + 1) * H * F_a * MID_CONSTANT
-            marginal = mid_wait(F_a + 1, F_l + 1, H) - mid_wait(F_a, F_l, H)
-            mid_cost += cost
-            print(f"{e:>4} {i:>5} {direction:>5} {F_a:>8.2f} {F_l:>9.2f} {N:>6.2f} {H:>7.2f} {cost:>8.2f} {marginal:>9.2f}")
+            cost = (F_l / k + 1) * H * F_a * MID_CONSTANT
+            mid_cost += cost                       # count every term, even tiny ones
+            if F_a < 0.01:
+                continue                           # only skip the printing
+            marginal = (mid_wait(F_a + EPS, F_l + EPS, H) - mid_wait(F_a, F_l, H)) / EPS
+            print(f"{e:>4} {i:>5} {direction:>5} {F_a:>8.2f} {F_l:>9.2f} {F_l / k:>6.2f} "
+                  f"{H:>7.2f} {cost:>8.2f} {marginal:>9.2f}")
 
     total = stairs_cost + elev_cost + base_cost + mid_cost
     print("\n=== Cost summary ===")
@@ -641,8 +692,41 @@ def cost_breakdown(x_opt, model=None):
     if model is not None:
         print(f"  SCIP objective    : {model.getObjVal():8.2f}")
 
-output(x_opt)
-cost_breakdown(x_opt, model)
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Run_time.json")
+
+def log_run(record):
+    runs = []
+    if os.path.exists(LOG_FILE):
+        try:
+            with open(LOG_FILE, "r") as f:
+                runs = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            runs = []
+    if not isinstance(runs, list):
+        runs = []
+    runs.append(record)
+    try:
+        with open(LOG_FILE, "w") as f:
+            json.dump(runs, f, indent=2)
+    except OSError as err:
+        print(f"Could not write run log: {err}")
+
+log_run({
+    "solver": "scip",
+    "m": m,
+    "elevators": p,
+    "floors": s,
+    "people": int(total_people),
+    "capacity": CAPASITY_ELEVATOR,
+    "init_time": round(init_time, 4),
+    "opt_time": round(opt_time, 4),
+    "status": status,
+    "objective": model.getObjVal() if status == "optimal" else None,
+})
+
+if status == "optimal":
+    output(x_opt)
+    cost_breakdown(x_opt, model)
 #endregion
 
 
