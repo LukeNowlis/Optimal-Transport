@@ -10,9 +10,9 @@ import json, os
 #===================
 t_init_start = time.perf_counter()
 
-NUMBER_OF_FLOORS=4
+NUMBER_OF_FLOORS=5
 s=NUMBER_OF_FLOORS
-NUMBER_OF_ELEVATORS=3
+NUMBER_OF_ELEVATORS=2
 p=NUMBER_OF_ELEVATORS
 CAPASITY_ELEVATOR=5
 
@@ -46,11 +46,17 @@ print(np.round(T_stairs, 3))
 #supply matrix
 RANGE=10 #number of people who could be assigned any one floor and destination
 print('Supply')
-rng = np.random.default_rng()            
+rng = np.random.default_rng(10)            
 E = rng.integers(0, RANGE, size=(s, s))    
 np.fill_diagonal(E, 0)     
 total_people = int(E.sum()) #total_people in the system 
+max_people_one_floor = int(E.sum(axis=1).max()) #most people entering at a floor 
 print(E)
+
+people_with_d = E.sum(axis=0)
+
+print("People with destination d:")
+print(people_with_d)
 
 m=total_people #BIG m, used as an upper bound, can use some tightening later potentialy 
 #endregion 
@@ -68,7 +74,7 @@ f_lambda_num=s*p*i_j_pairs_given_d
 f_eta_num=s*i_j_pairs_given_d
 f_omega_num=s*(s-1)
 n_num=p
-n_max=math.ceil(total_people/CAPASITY_ELEVATOR)
+n_max =math.ceil(E[0].sum() / CAPASITY_ELEVATOR) # True bound but much bigger(total_people - people_with_d[0])
 N = n_max + 1
 w_num = p * N * h_num #Only correct since h_num hasn't been mutiplied by p yet 
 
@@ -189,6 +195,8 @@ for nu in range(n_max + 1):
 
 #region OPTIMIZATION INITALIZATION 
 #=================================
+BOUND=max_people_one_floor*0.9 #bound not perfect but gets most senarios 
+
 cont = sum([f_alpha_num, f_beta_num, f_lambda_num, f_omega_num, f_eta_num])
 bi= sum([v_num,h_num])
 
@@ -198,7 +206,6 @@ binary_blocks = {'v', 'h', 'w'}
 vars_list = [None] * total_vars
 
 integer_blocks = {'n'}
-n_max = int(np.ceil(E.sum() / CAPASITY_ELEVATOR)) 
 
 #Establish variables, type and bounds 
 for name, (start, end) in idx.items():
@@ -208,7 +215,25 @@ for name, (start, end) in idx.items():
         elif name in integer_blocks:
             vars_list[c] = model.addVar(name=f"{name}_{c}", vtype="I", lb=0, ub=n_max)
         else:
-            vars_list[c] = model.addVar(name=f"{name}_{c}", vtype="C", lb=0, ub=m)
+            vars_list[c] = model.addVar(name=f"{name}_{c}", vtype="C", lb=0, ub=BOUND)
+
+#Potentially tightens bounds in this section 
+def cap(d):
+    # largest any single flow heading to destination d can be
+    return float(min(BOUND, people_with_d[d]))
+
+for d in range(s):
+    for e in range(p):
+        for i in range(s):
+            if i != d:
+                vars_list[col_f_alpha(i, e, d)].UB = cap(d)
+        for j in range(s):
+            vars_list[col_f_beta(j, e, d)].UB = cap(d)
+
+for (d, i, j), pidx in pair_lookup.items():
+    vars_list[col_f_eta(d, pidx)].UB = cap(d)
+    for e in range(p):
+        vars_list[col_f_lambda(d, e, pidx)].UB = cap(d)
 #endregion
 
 #region ADDING CONSTRIANTS
@@ -218,9 +243,10 @@ for name, (start, end) in idx.items():
 #Constaint on f_lambda, to take people from i to j elevator must stop at both floors 
 for e in range(p):
     for (d, i, j), pair_idx in pair_lookup.items():
+        MD=min(BOUND,people_with_d[d]) # f_lamda cannot be bigger than people_with_d[d] so this bound is fine. If there is a problem with BOUND then we will get ther error at the end anyway so it's okay to take the min here 
         f = vars_list[col_f_lambda(d, e, pair_idx)]
-        model.addConstr(f <= m * vars_list[col_v(e, i)])    # must stop at origin
-        model.addConstr(f <= m * vars_list[col_v(e, j)])    # must stop at destination
+        model.addConstr(f <= MD * vars_list[col_v(e, i)])    # must stop at origin
+        model.addConstr(f <=MD * vars_list[col_v(e, j)])    # must stop at destination
 
 #EQ 3 
 #Constraint on f_lambda, to take people from i to k elevator cant stop on any j floors 
@@ -237,6 +263,7 @@ for e in range(p):
                 any_term = True
             if not any_term:
                 continue
+            MD=min(BOUND,people_with_d[d])
             model.addConstr(expr <= m)
 
 # EQ 4 
@@ -331,13 +358,10 @@ for e in range(p):
 # EQ 9
 #count must match number of stops
 for e in range(p):
-    total_stops = quicksum(vars_list[col_v(e, i)] for i in range(s))
-    for (T, count), _ in h_pair_lookup.items():
-        h = vars_list[col_h(e, T, count)]
-        # total_stops = count  =>  h = 1   (equivalently: h = 0  =>  total_stops != count)
-        # two-sided big-M on |total_stops - count| <= (s) * (1 - h)
-        model.addConstr(total_stops - count <= s * (1 - h))
-        model.addConstr(count - total_stops <= s * (1 - h))
+    model.addConstr(
+        quicksum(vars_list[col_v(e, i)] for i in range(s))
+        == quicksum(count * vars_list[col_h(e, T, count)] for (T, count) in h_pair_lookup)
+    )
 
 #EQ 10
 # exactly one (T, count) is active per period
@@ -367,6 +391,7 @@ for e in range(p):
             == vars_list[col_h(e, T, count)]
         )
 
+#EQ16
 # The n of the active W must equal the n variable.
 for e in range(p):
     model.addConstr(
@@ -374,6 +399,16 @@ for e in range(p):
         == quicksum(nu * vars_list[col_w(e, nu, T, count)]
                     for nu in range(N)
                     for (T, count) in h_pair_lookup)
+    )
+
+#EQ 17 
+#Don't recheck elevator options that have already been checked since elevators are identical
+# look at this more  
+route_key = {(T, c): T * (s + 1) + c for (T, c) in h_pair_lookup}
+for e in range(p - 1):
+    model.addConstr(
+        quicksum(route_key[r] * vars_list[col_h(e, *r)] for r in h_pair_lookup)
+        >= quicksum(route_key[r] * vars_list[col_h(e + 1, *r)] for r in h_pair_lookup)
     )
 #endregion
 
@@ -440,8 +475,8 @@ for e in range(p):
     n = vars_list[col_n(e)]
     H = H_expr(e)
     W = W_expr(e)
-    base_sum += k * W * (n - 1) / 2 # sum from 0 to n-1
-    base_sum += (F_alpha_cost(0, e, 'up') - (n - 1) * k) * W
+    base_sum += K * W * (n - 1) / 2 # sum from 0 to n-1
+    base_sum += (F_alpha_cost(0, e, 'up') - (n - 1) * K) * W
 
 # Mid floors, added U constrint to turn this equation into a quadratic as well 
 mid_sum = 0
@@ -491,6 +526,45 @@ print(status)
 print(f"Optimization took {opt_time:.2f} seconds")
 
 if model.Status == GRB.OPTIMAL:
+    TOL = 1e-6
+    
+    # 1. Continuous variables that hit the BOUND
+    # (Storing the name and value so you can see exactly which one it is)
+    hit_flow = [(v.VarName, v.X) for v in model.getVars()
+                if v.VType == GRB.CONTINUOUS
+                and abs(v.UB - BOUND) < 1e-9
+                and v.X >= v.UB - TOL]
+    
+    # 2. Integer variable n at its ceiling
+    hit_n = [(vars_list[col_n(e)].VarName, vars_list[col_n(e)].X) for e in range(p)
+             if vars_list[col_n(e)].X >= n_max - TOL]
+
+    # 3. Lobby boarding at its cap
+    hit_lobby = [e for e in range(p)
+                 if sum(vars_list[col_f_alpha(0, e, d)].X for d in range(1, s))
+                    >= n_max * CAPASITY_ELEVATOR - TOL]
+
+    # Changed from raising an error to printing a warning
+    if hit_flow or hit_lobby or hit_n:
+        print("\n" + "="*50)
+        print("WARNING: The true optimum may be blocked!")
+        print("You may need to raise BOUND or n_max and re-run.")
+        
+        if hit_flow:
+            print(f"\nContinuous variables at BOUND ({BOUND}):")
+            for name, val in hit_flow:
+                print(f"  - {name} = {val:.4f}")
+                
+        if hit_n:
+            print(f"\nInteger variables n at n_max ({n_max}):")
+            for name, val in hit_n:
+                print(f"  - {name} = {val}")
+                
+        if hit_lobby:
+            print(f"\nLobby boarding on elevators {hit_lobby} is at the cap:")
+            print(f"  (Capacity = {n_max * CAPASITY_ELEVATOR})")
+        print("="*50 + "\n")
+    
     x_opt = np.array([v.X for v in vars_list])
 
     print("\n=== W check ===")
