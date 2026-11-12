@@ -10,9 +10,9 @@ import json, os
 #===================
 t_init_start = time.perf_counter()
 
-NUMBER_OF_FLOORS=5
+NUMBER_OF_FLOORS=7
 s=NUMBER_OF_FLOORS
-NUMBER_OF_ELEVATORS=2
+NUMBER_OF_ELEVATORS=3
 p=NUMBER_OF_ELEVATORS
 CAPASITY_ELEVATOR=5
 
@@ -201,6 +201,7 @@ cont = sum([f_alpha_num, f_beta_num, f_lambda_num, f_omega_num, f_eta_num])
 bi= sum([v_num,h_num])
 
 model = gp.Model()
+model.Params.MIPGap = 0.075 #Error we stop at when finding the optimal solution 
 
 binary_blocks = {'v', 'h', 'w'}
 vars_list = [None] * total_vars
@@ -410,6 +411,18 @@ for e in range(p - 1):
         quicksum(route_key[r] * vars_list[col_h(e, *r)] for r in h_pair_lookup)
         >= quicksum(route_key[r] * vars_list[col_h(e + 1, *r)] for r in h_pair_lookup)
     )
+
+#EQ 18
+#constraints on f_alpha and Beta to speed up solver 
+for e in range(p):
+    for d in range(s):
+        for j in range(s):
+            if j != d:
+                model.addConstr(vars_list[col_f_alpha(j, e, d)] <= cap(d) * vars_list[col_v(e, j)])
+            model.addConstr(vars_list[col_f_beta(j, e, d)] <= cap(d) * vars_list[col_v(e, j)])
+
+
+
 #endregion
 
 #region Objective function
@@ -489,7 +502,9 @@ for e in range(p):
         Fl = F_lambda_cost(i, e, direction)
 
         # one copy of Fa per route
-        u = {c: model.addVar(lb=0, ub=m) for c in h_pair_lookup}
+        dests = range(i + 1, s) if direction == 'up' else range(0, i)
+        Mu = sum(cap(d) for d in dests)
+        u = {c: model.addVar(lb=0, ub=Mu) for c in h_pair_lookup}
         for c in h_pair_lookup:
             model.addConstr(u[c] <= m * vars_list[col_h(e, *c)])   # off unless route c is active
         model.addConstr(quicksum(u.values()) == Fa)                   # copies add up to Fa
@@ -567,23 +582,23 @@ if model.Status == GRB.OPTIMAL:
     
     x_opt = np.array([v.X for v in vars_list])
 
-    print("\n=== W check ===")
-    for e in range(p):
-        n_val = x_opt[col_n(e)]
+    # print("\n=== W check ===")
+    # for e in range(p):
+    #     n_val = x_opt[col_n(e)]
 
-        # h dot headway_lookup (WAIT_FACTOR not applied, raw headway)
-        H_dot = sum(headway_lookup[(T, count)] * x_opt[col_h(e, T, count)]
-                    for (T, count) in h_pair_lookup)
+    #     # h dot headway_lookup (WAIT_FACTOR not applied, raw headway)
+    #     H_dot = sum(headway_lookup[(T, count)] * x_opt[col_h(e, T, count)]
+    #                 for (T, count) in h_pair_lookup)
 
-        # w dot W_lookup (this is n * WAIT_FACTOR * H)
-        W_dot = sum(W_lookup[(nu, T, count)] * x_opt[col_w(e, nu, T, count)]
-                    for (nu, T, count) in W_lookup)
+    #     # w dot W_lookup (this is n * WAIT_FACTOR * H)
+    #     W_dot = sum(W_lookup[(nu, T, count)] * x_opt[col_w(e, nu, T, count)]
+    #                 for (nu, T, count) in W_lookup)
 
-        # what W_dot should equal
-        expected = n_val * WAIT_FACTOR * H_dot
+    #     # what W_dot should equal
+    #     expected = n_val * WAIT_FACTOR * H_dot
 
-        print(f"  Elevator {e}: n = {n_val:.0f} | h.headway = {H_dot:.2f} | "
-              f"w.W_lookup = {W_dot:.2f} | expected n*WAIT_FACTOR*H = {expected:.2f}")
+    #     print(f"  Elevator {e}: n = {n_val:.0f} | h.headway = {H_dot:.2f} | "
+    #           f"w.W_lookup = {W_dot:.2f} | expected n*WAIT_FACTOR*H = {expected:.2f}")
 
 def plot_flow_matrix(matrix, title, ax, vmax):
     ax.imshow(matrix, cmap='viridis', vmin=0, vmax=vmax)
@@ -666,9 +681,10 @@ def output(x_opt):
     for e in range(p):
         served = [i for i in range(s) if x_opt[col_v(e, i)] > 0.5]
         plot_flow_matrix(elevator_matrices[e], f"Elevator {e} (stops: {served})", axes[2 + e], vmax)
-    plt.suptitle("Overall Project Flow", fontsize=16)
+    plt.suptitle(f"Overall Project Flow.   MIP para = {model.Params.MIPGap}\nRuntime = {opt_time}.     Objective = {model.ObjVal}", fontsize=12)
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"./testing_MIP/floor{s}-elev{p}-MIP{model.Params.MIPGap}.png", dpi = 300)
+    # plt.show()
 
 def cost_breakdown(x_opt, model=None):
     k = CAPASITY_ELEVATOR
@@ -798,21 +814,26 @@ def log_run(record):
     except OSError as err:
         print(f"Could not write run log: {err}")
 
-log_run({
-    "solver": "gurobi",
-    "m": m,
-    "elevators": p,
-    "floors": s,
-    "people": int(total_people),
-    "capacity": CAPASITY_ELEVATOR,
-    "init_time": round(init_time, 4),
-    "opt_time": round(opt_time, 4),
-    "status": status,
-    "objective": model.ObjVal if model.Status == GRB.OPTIMAL else None,
-})
-
-if model.Status == GRB.OPTIMAL:
+#PC VERISON
+PC=True
+if model.Status == GRB.OPTIMAL and PC==True:
     output(x_opt)
     cost_breakdown(x_opt, model)
+    log_run({
+        "solver": "gurobi",
+        "m": m,
+        "elevators": p,
+        "floors": s,
+        "people": int(total_people),
+        "capacity": CAPASITY_ELEVATOR,
+        "init_time": round(init_time, 4),
+        "opt_time": round(opt_time, 4),
+        "status": status,
+        "objective": model.ObjVal if model.Status == GRB.OPTIMAL else None,
+    })
 #endregion
+
+
+
+
 
