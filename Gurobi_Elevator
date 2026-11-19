@@ -6,13 +6,17 @@ import time
 import math
 import json, os
 
+print(gp.gurobi.version()) 
+
+NUMBER_OF_FLOORS=4
+NUMBER_OF_ELEVATORS=3
+GAP=0.1
+
 #region INITALIZING NUMBERS
 #===================
 t_init_start = time.perf_counter()
 
-NUMBER_OF_FLOORS=7
 s=NUMBER_OF_FLOORS
-NUMBER_OF_ELEVATORS=3
 p=NUMBER_OF_ELEVATORS
 CAPASITY_ELEVATOR=5
 
@@ -201,7 +205,7 @@ cont = sum([f_alpha_num, f_beta_num, f_lambda_num, f_omega_num, f_eta_num])
 bi= sum([v_num,h_num])
 
 model = gp.Model()
-model.Params.MIPGap = 0.075 #Error we stop at when finding the optimal solution 
+model.Params.MIPGap = GAP #Error we stop at when finding the optimal solution 
 
 binary_blocks = {'v', 'h', 'w'}
 vars_list = [None] * total_vars
@@ -525,9 +529,13 @@ print(f"Initalizing took {init_time:.2f} seconds")
 t_opt_start = time.perf_counter() 
 t = model.addVar(name="t", vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY)
 model.addConstr(t >= obj_expr)
-model.Params.OutputFlag = 0
+model.Params.OutputFlag = 1
 model.Params.NonConvex = 2 
 model.setObjective(t, GRB.MINIMIZE)
+
+model.setParam('Method', 6) 
+model.setParam('PDHGGPU', 1)   # GPU Acceleration
+
 model.optimize()
 
 opt_time = time.perf_counter() - t_opt_start
@@ -684,7 +692,7 @@ def output(x_opt):
     plt.suptitle(f"Overall Project Flow.   MIP para = {model.Params.MIPGap}\nRuntime = {opt_time}.     Objective = {model.ObjVal}", fontsize=12)
     plt.tight_layout()
     plt.savefig(f"./testing_MIP/floor{s}-elev{p}-MIP{model.Params.MIPGap}.png", dpi = 300)
-    # plt.show()
+    plt.show()
 
 def cost_breakdown(x_opt, model=None):
     k = CAPASITY_ELEVATOR
@@ -829,10 +837,11 @@ if model.Status == GRB.OPTIMAL and PC==True:
         "init_time": round(init_time, 4),
         "opt_time": round(opt_time, 4),
         "status": status,
+        "mip_gap": model.Params.MIPGap,
+        "objective_function": str(model.getObjective()),
         "objective": model.ObjVal if model.Status == GRB.OPTIMAL else None,
     })
 #endregion
-
 
 
 
