@@ -534,7 +534,7 @@ model.Params.NonConvex = 2
 model.setObjective(t, GRB.MINIMIZE)
 
 model.setParam('Method', 6) 
-model.setParam('PDHGGPU', 1)   # GPU Acceleration
+model.setParam('PDHGGPU', 1)   # GPU Acceleration. Set to 0 to use CPU only; 1 to use GPU.
 
 model.optimize()
 
